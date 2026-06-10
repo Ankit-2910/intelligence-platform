@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo, startTransition, useTransition } from 'react'
 import { Chart, registerables } from 'chart.js'
 import { getBandColor, getBandClass, fmt } from '../utils/processor.js'
 Chart.register(...registerables)
@@ -6,6 +6,13 @@ Chart.defaults.color = '#7B98B5'
 Chart.defaults.font.family = "'Inter', sans-serif"
 Chart.defaults.font.size = 11
 
+
+/* ══ simple debounce ══ */
+function useDebounce(value, delay) {
+  const [dv, setDv] = React.useState(value)
+  useEffect(() => { const t = setTimeout(() => setDv(value), delay); return () => clearTimeout(t) }, [value, delay])
+  return dv
+}
 /* ══ tiny helpers ══ */
 const bc  = (p) => getBandColor(p)
 const bcl = (b) => getBandClass(b)
@@ -28,9 +35,19 @@ function PBar({ pct }) {
   )
 }
 
-/* ══ Chart hook — destroy on remount ══ */
+/* ══ Chart hook — lightweight sig, no JSON.stringify on large arrays ══ */
 function useChart(id, type, data, options) {
   const ref = useRef(null)
+  // cheap signature: length + first + last — avoids serialising 16K rows
+  const sig = (() => {
+    try {
+      const ds = data?.datasets?.[0]; const d = ds?.data
+      const len = Array.isArray(d) ? d.length : 0
+      const f = len > 0 ? (typeof d[0]==='object' ? d[0].y : d[0]) : 0
+      const l = len > 0 ? (typeof d[len-1]==='object' ? d[len-1].y : d[len-1]) : 0
+      return id + '|' + len + '|' + f + '|' + l + '|' + (data?.labels?.length ?? 0)
+    } catch(e) { return id }
+  })()
   useEffect(() => {
     const canvas = document.getElementById(id)
     if (!canvas) return
@@ -38,7 +55,8 @@ function useChart(id, type, data, options) {
     if (existing) existing.destroy()
     ref.current = new Chart(canvas, { type, data, options })
     return () => { if (ref.current) { ref.current.destroy(); ref.current = null } }
-  }, [JSON.stringify(data)])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sig])
 }
 
 /* ═════════════════════════ PAGE 1: EXECUTIVE ═════════════════════════ */
@@ -298,7 +316,8 @@ function SchoolPage({ data }) {
   const { schools, divisions, bandByDiv, totalByDiv } = data
   const [selDiv,  setSelDiv]  = useState('ALL')
   const [selBand, setSelBand] = useState('ALL')
-  const [query,   setQuery]   = useState('')
+  const [queryRaw, setQueryRaw] = useState('')
+  const query = useDebounce(queryRaw, 280)
   const [sortKey, setSortKey] = useState('pass_pct')
   const [sortDir, setSortDir] = useState(-1)
   const [page,    setPage]    = useState(0)
@@ -340,12 +359,12 @@ function SchoolPage({ data }) {
   const scDatasets = selDiv === 'ALL'
     ? divisions.map((d,i) => ({
         label: d.name,
-        data: filtered.filter(s=>s.division===d.name).map(s=>({x:s.appeared,y:s.pass_pct,name:s.name,district:s.district})),
+        data: (() => { const pts = filtered.filter(s=>s.division===d.name).map(s=>({x:s.appeared,y:s.pass_pct,name:s.name,district:s.district})); return pts.length > 400 ? pts.filter((_,i)=>i%(Math.ceil(pts.length/400))===0) : pts })(),
         backgroundColor: (divCols[i]||'#94A3B8')+'BB', pointRadius:4, pointHoverRadius:8
       }))
     : [{
         label: selDiv,
-        data: filtered.map(s=>({x:s.appeared,y:s.pass_pct,name:s.name,district:s.district})),
+        data: (() => { const pts = filtered.map(s=>({x:s.appeared,y:s.pass_pct,name:s.name,district:s.district})); return pts.length > 400 ? pts.filter((_,i)=>i%(Math.ceil(pts.length/400))===0) : pts })(),
         backgroundColor: '#00B5E2BB', pointRadius:4, pointHoverRadius:8
       }]
 
@@ -358,7 +377,7 @@ function SchoolPage({ data }) {
         y:{grid:{color:'rgba(26,48,80,.5)'},title:{display:true,text:'Pass %',color:'#7B98B5'},ticks:{callback:v=>v+'%'}}}}
   )
 
-  const reset = () => { setSelDiv('ALL'); setSelBand('ALL'); setQuery(''); setPage(0) }
+  const reset = () => { setSelDiv('ALL'); setSelBand('ALL'); setQueryRaw(''); setPage(0) }
 
   return (
     <div className="page-body">
@@ -380,8 +399,8 @@ function SchoolPage({ data }) {
             {BANDS.map(b=><option key={b} value={b}>{b}</option>)}
           </select></div>
         <div className="sl"><div className="sl-label">School / District Search</div>
-          <input className="sl-input" placeholder="Type to search…" value={query}
-            onChange={e=>{setQuery(e.target.value);setPage(0)}} /></div>
+          <input className="sl-input" placeholder="Type to search…" value={queryRaw}
+            onChange={e=>{setQueryRaw(e.target.value);setPage(0)}} /></div>
         <div className="sl">
           <button className="btn-ghost sm" onClick={reset} style={{marginTop:20}}>↺ Reset</button></div>
       </div>
@@ -484,7 +503,7 @@ export default function DashboardPage({ rawData, onReset }) {
         </div>
         <div className="nav-pills">
           {[['exec','⬛ Executive'],['div','◈ Division Intelligence'],['school','◉ School Intelligence']].map(([id,label])=>(
-            <button key={id} className={`nav-pill ${tab===id?'active':''}`} onClick={()=>setTab(id)}>{label}</button>
+            <button key={id} className={`nav-pill ${tab===id?'active':''}`} onClick={()=>startTransition(()=>setTab(id))}>{label}</button>
           ))}
         </div>
         <div className="toolbar">
